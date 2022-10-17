@@ -2,6 +2,7 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <deque>
 #include <TlHelp32.h>
 #include "mhyprot.hpp"
 
@@ -39,12 +40,31 @@ int main() {
 
     DWORD procId;
 
-    while (!(procId = GetProcessIDByName(L"CabalMain.exe")))
+    while (!(procId = GetProcessIDByName(L"csrss.exe")))
         this_thread::sleep_for(chrono::milliseconds(100));
 
-    auto result = mhyprot::ReadProcessMemory<DWORD>(0x400000);
+    deque<mhyprot::ModuleInfo> mods;
+    deque<mhyprot::ThreadInfo> threads;
 
-    printf("%08X\n", result);
+    mhyprot::SetProcessID(procId);
+    
+    if (mhyprot::GetProcessModules(mods)) {
+        cout << "[Modules]" << endl;
 
-    // mhyprot::Uninstall();
+        for (auto& mod : mods)
+            wcout << format(L"{:<32} {}", mod.ImageName, mod.FileName) << endl;
+
+        cout << endl;
+    }
+
+    if (mhyprot::GetProcessThreads(threads)) {
+        cout << "[Thread]" << endl;
+
+        for (auto& thread : threads)
+            wcout << format(L"{:016X} {:016X}", thread.KernelAddress, thread.StartAddress) << endl;
+
+        cout << endl;
+    }
+
+    mhyprot::Uninstall();
 }

@@ -1,9 +1,19 @@
 #pragma once
 #include <Windows.h>
 #include <string>
-#include <vector>
+#include <deque>
 
 namespace mhyprot {
+	struct ThreadInfo {
+		DWORD64 KernelAddress;
+		DWORD64 StartAddress;
+	};
+
+	struct ModuleInfo {
+		std::wstring ImageName;
+		std::wstring FileName;
+	};
+
 	bool Initialize();
 	bool Install();
 	void Uninstall();
@@ -12,7 +22,10 @@ namespace mhyprot {
 	bool ReadKernelMemory(DWORD64 Address, void* Buffer, DWORD Size);
 	bool ReadProcessMemory(DWORD64 Address, void* Buffer, DWORD Size);
 	bool WriteProcessMemory(DWORD64 Address, void* Buffer, DWORD Size);
-	bool GetProcessModules(DWORD MaxCount, std::vector<std::pair<std::wstring, std::wstring>>& Result);
+	bool GetProcessModules(std::deque<ModuleInfo>& Result);
+	bool GetProcessThreads(std::deque<ThreadInfo>& result);
+	DWORD GetSystemUptime();
+	bool TerminateProcess();
 
 	template<class T> __forceinline T ReadKernelMemory(DWORD64 address) {
 		T buffer;

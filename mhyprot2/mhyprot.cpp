@@ -30,10 +30,17 @@
 #define CHECK_HANDLE(x) (x && x != INVALID_HANDLE_VALUE)
 #define MIN_ADDRESS ((ULONG_PTR)0x8000000000000000)
 
-#define THROW_WINAPI_(name, msg, result) throw exception(vformat(__FUNCTION__ " => " name " = " msg " ({:08X})", make_format_args(result)).c_str())
-#define THROW_WINAPI(name, msg) throw exception(vformat(__FUNCTION__ " => " name " = " msg " ({:08X})", make_format_args(GetLastError())).c_str())
-#define THROW_NTAPI(name, result) throw exception(vformat(__FUNCTION__ " => " name " = {:08X}", make_format_args(result)).c_str())
-#define THROW_USER(name, msg) throw exception(__FUNCTION__ " => " name " = msg")
+#ifdef _DEBUG
+#	define THROW_WINAPI_(name, msg, result) throw exception(vformat(__FUNCTION__ " => " name " = " msg " ({:08X})", make_format_args(result)).c_str())
+#	define THROW_WINAPI(name, msg)          throw exception(vformat(__FUNCTION__ " => " name " = " msg " ({:08X})", make_format_args(GetLastError())).c_str())
+#	define THROW_NTAPI(name, result)        throw exception(vformat(__FUNCTION__ " => " name " = {:08X}", make_format_args(result)).c_str())
+#	define THROW_USER(name, msg)            throw exception(__FUNCTION__ " => " name " = msg")
+#else
+#	define THROW_WINAPI_(name, msg, result) throw exception()
+#	define THROW_WINAPI(name, msg)          throw exception()
+#	define THROW_NTAPI(name, result)        throw exception()
+#	define THROW_USER(name, msg)            throw exception()
+#endif
 
 #undef CreateService
 
@@ -81,6 +88,23 @@ typedef struct _MHYPROT_USER_READ_WRITE_REQUEST {
 	ULONG		size;
 	ULONG		reverved_03;
 } MHYPROT_USER_READ_WRITE_REQUEST, * PMHYPROT_USER_READ_WRITE_REQUEST;
+
+typedef struct _MHYPROT_ENUM_PROCESS_THREADS_REQUEST {
+	DWORD validation_code;
+	DWORD process_id;
+	DWORD owner_process_id;
+} MHYPROT_ENUM_PROCESS_THREADS_REQUEST, * PMHYPROT_ENUM_PROCESS_THREADS_REQUEST;
+
+typedef struct _MHYPROT_THREAD_INFORMATION {
+	DWORD64 kernel_address;
+	DWORD64 start_address;
+	bool unknown;
+} MHYPROT_THREAD_INFORMATION, * PMHYPROT_THREAD_INFORMATION;
+
+typedef struct _MHYPROT_TERMINATE_PROCESS_REQUEST {
+	DWORD64 response;
+	DWORD process_id;
+} MHYPROT_TERMINATE_PROCESS_REQUEST, * PMHYPROT_TERMINATE_PROCESS_REQUEST;
 
 typedef struct _MHYPROT_ENUM_PROCESS_MODULES_REQUEST {
 	uint32_t process_id;
@@ -310,6 +334,8 @@ DWORD64 mhyprot::FindSysmoduleAddressByName(const std::string& ModuleName) {
 }
 
 bool mhyprot::ReadKernelMemory(DWORD64 address, void* buffer, DWORD size) {
+	assert(GDrvHandle != 0 && "Please 'Initialize' before call function");
+
 	static_assert(sizeof(DWORD) == 4 /*"invalid compiler specific size of DWORD, this may cause BSOD"*/);
 
 	DWORD Payload_size = size + sizeof(DWORD);
@@ -340,6 +366,7 @@ bool mhyprot::ReadKernelMemory(DWORD64 address, void* buffer, DWORD size) {
 }
 
 bool mhyprot::ReadProcessMemory(DWORD64 address, void* buffer, DWORD size) {
+	assert(GDrvHandle != 0 && "Please 'Initialize' before call function");
 	assert(GProcessId != 0 && "Set 'ProcessID' before call function");
 
 	MHYPROT_USER_READ_WRITE_REQUEST Payload;
@@ -368,6 +395,7 @@ bool mhyprot::ReadProcessMemory(DWORD64 address, void* buffer, DWORD size) {
 }
 
 bool mhyprot::WriteProcessMemory(DWORD64 address, void* buffer, DWORD size) {
+	assert(GDrvHandle != 0 && "Please 'Initialize' before call function");
 	assert(GProcessId != 0 && "Set 'ProcessID' before call function");
 
 	MHYPROT_USER_READ_WRITE_REQUEST payload;
@@ -395,20 +423,21 @@ bool mhyprot::WriteProcessMemory(DWORD64 address, void* buffer, DWORD size) {
 	return true;
 }
 
-bool mhyprot::GetProcessModules(DWORD MaxCount, vector<pair<wstring, wstring>>& result) {
+bool mhyprot::GetProcessModules(deque<ModuleInfo>& result) {
+	assert(GDrvHandle != 0 && "Please 'Initialize' before call function");
 	assert(GProcessId != 0 && "Set 'ProcessID' before call function");
 	
-	const DWORD payload_context_size = static_cast<DWORD64>(MaxCount) * MHYPROT_ENUM_PROCESS_MODULE_SIZE;
+	const DWORD payload_context_size = static_cast<DWORD64>(64) * MHYPROT_ENUM_PROCESS_MODULE_SIZE;
 	const DWORD alloc_size = sizeof(MHYPROT_ENUM_PROCESS_MODULES_REQUEST) + payload_context_size;
 
-	PMHYPROT_ENUM_PROCESS_MODULES_REQUEST payload =	(PMHYPROT_ENUM_PROCESS_MODULES_REQUEST)calloc(1, alloc_size);
+	auto payload = (PMHYPROT_ENUM_PROCESS_MODULES_REQUEST)calloc(1, alloc_size);
 
 	try {
 		if (!payload)
 			throw bad_alloc();
 
-		payload->process_id = GProcessId;   // target process id
-		payload->max_count = MaxCount;     // max module count to lookup
+		payload->process_id = GProcessId;
+		payload->max_count = 64;
 
 		RequestIOCTL(MHYPROT_IOCTL_ENUM_PROCESS_MODULES, payload, alloc_size);
 
@@ -417,14 +446,12 @@ bool mhyprot::GetProcessModules(DWORD MaxCount, vector<pair<wstring, wstring>>& 
 
 		const void* payload_context = reinterpret_cast<void*>(payload + 0x2);
 
-		for (DWORD64 offset = 0x0;
-			offset < payload_context_size;
-			offset += MHYPROT_ENUM_PROCESS_MODULE_SIZE) {
+		for (DWORD64 offset = 0x0; offset < payload_context_size; offset += MHYPROT_ENUM_PROCESS_MODULE_SIZE) {
 			const std::wstring module_name = reinterpret_cast<wchar_t*>((DWORD64)payload_context + offset);
 			const std::wstring module_path = reinterpret_cast<wchar_t*>((DWORD64)payload_context + (offset + 0x100));
 
 			if (module_name.empty() && module_path.empty())
-				continue;
+				break;
 
 			result.push_back({ module_name, module_path });
 		}
@@ -435,11 +462,103 @@ bool mhyprot::GetProcessModules(DWORD MaxCount, vector<pair<wstring, wstring>>& 
 		UNREFERENCED_PARAMETER(e);
 #endif
 		
-		free(payload);
+		if (payload)
+			free(payload);
+
 		return false;
 	}
 
 	free(payload);
+	return true;
+}
+
+bool mhyprot::GetProcessThreads(deque<ThreadInfo>& result) {
+	assert(GDrvHandle != 0 && "Please 'Initialize' before call function");
+	assert(GProcessId != 0 && "Set 'ProcessID' before call function");
+
+	const size_t alloc_size = 64 * MHYPROT_ENUM_PROCESS_THREADS_SIZE;
+	auto payload = (PMHYPROT_ENUM_PROCESS_THREADS_REQUEST)calloc(1, alloc_size);
+
+	try {
+		if (!payload)
+			throw bad_alloc();
+
+		payload->validation_code = MHYPROT_ENUM_PROCESS_THREADS_CODE;
+		payload->process_id = GProcessId;
+		payload->owner_process_id = GProcessId;
+
+		RequestIOCTL(MHYPROT_IOCTL_ENUM_PROCESS_THREADS, payload, alloc_size);
+
+	} catch (const exception& e) {
+#ifdef _DEBUG
+		OutputDebugStringA(e.what());
+#else
+		UNREFERENCED_PARAMETER(e);
+#endif
+
+		if (payload)
+			free(payload);
+
+		return false;
+	}
+
+	if (!payload->validation_code ||
+		payload->validation_code <= 0 ||
+		payload->validation_code > 1000) {
+		free(payload);
+		return false;
+	}
+
+	const void* payload_context = reinterpret_cast<void*>(payload + 1);
+
+	const DWORD thread_count = payload->validation_code;
+
+	for (DWORD64 offset = 0x0; offset < (MHYPROT_ENUM_PROCESS_THREADS_SIZE * thread_count); offset += MHYPROT_ENUM_PROCESS_THREADS_SIZE) {
+		const auto thread_information =	reinterpret_cast<PMHYPROT_THREAD_INFORMATION>((DWORD64)payload_context + offset);
+
+		result.push_back({ thread_information->kernel_address, thread_information->start_address});
+	}
+
+	free(payload);
+	return true;
+}
+
+DWORD mhyprot::GetSystemUptime() {
+	assert(GDrvHandle != 0 && "Please 'Initialize' before call function");
+
+	static_assert(sizeof(DWORD) == 4, "invalid compiler specific size of DWORD, this may cause BSOD");
+	DWORD result;
+
+	RequestIOCTL(MHYPROT_IOCTL_GET_SYSTEM_UPTIME, &result, sizeof(DWORD));
+
+	return static_cast<DWORD>(result / 1000);
+}
+
+bool mhyprot::TerminateProcess() {
+	assert(GDrvHandle != 0 && "Please 'Initialize' before call function");
+	assert(GProcessId != 0 && "Set 'ProcessID' before call function");
+
+	MHYPROT_TERMINATE_PROCESS_REQUEST payload{};
+	payload.process_id = GProcessId;
+
+	try {
+
+		EncryptPayload(&payload, sizeof(payload));
+		RequestIOCTL(MHYPROT_IOCTL_TERMINATE_PROCESS, &payload, sizeof(payload));
+
+	} catch (const exception& e) {
+#ifdef _DEBUG
+		OutputDebugStringA(e.what());
+#else
+		UNREFERENCED_PARAMETER(e);
+#endif
+
+		return false;
+	}
+
+	if (!payload.response)
+		return false;
+
 	return true;
 }
 
@@ -467,6 +586,10 @@ void mhyprot::EncryptPayload(void* Payload, DWORD size) {
 
 void mhyprot::SetProcessID(DWORD ProcessId) {
 	GProcessId = ProcessId;
+}
+
+DWORD mhyprot::GetProcessID() {
+	return GProcessId;
 }
 
 
